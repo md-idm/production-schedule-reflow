@@ -9,7 +9,8 @@
     "build": "tsc",
     "lint": "eslint .",
     "format": "prettier . --write",
-    "check": "pnpm lint && pnpm build"
+    "test": "vitest run",
+    "check": "pnpm lint && pnpm build && pnpm test"
   },
   "keywords": [],
   "author": "",
@@ -22,10 +23,12 @@
     "@eslint/js": "10.0.1",
     "@types/luxon": "^3.7.1",
     "@types/node": "25.9.1",
+    "@vitest/coverage-v8": "^4.1.7",
     "eslint": "10.4.0",
     "prettier": "3.8.3",
     "tsx": "4.22.3",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.60.0"
+    "typescript-eslint": "8.60.0",
+    "vitest": "^4.1.7"
   }
 }
