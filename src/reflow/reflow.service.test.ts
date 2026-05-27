@@ -408,4 +408,118 @@ describe('reflowSchedule', () => {
       /Circular dependency detected between production work orders/,
     );
   });
+
+  it('leaves independent unaffected work orders unchanged', () => {
+    const cascadeInput = createDelayCascadeInput();
+    const input: ReflowInput = {
+      ...cascadeInput,
+      workCenters: [
+        ...cascadeInput.workCenters,
+        {
+          docId: 'wc-other',
+          docType: 'workCenter',
+          data: { name: 'Other Station', shifts, maintenanceWindows: [] },
+        },
+      ],
+      workOrders: [
+        ...cascadeInput.workOrders,
+        {
+          docId: 'wo-z-independent',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-INDEPENDENT',
+            manufacturingOrderId: 'mo-9001',
+            startDate: '2024-01-01T08:00:00.000Z',
+            endDate: '2024-01-01T10:00:00.000Z',
+            durationMinutes: 120,
+            workCenterId: 'wc-other',
+            dependsOnWorkOrderIds: [],
+            isMaintenance: false,
+          },
+        },
+      ],
+    };
+
+    const result = reflowSchedule(input);
+
+    expect(getWorkOrder(result, 'wo-z-independent').data).toEqual({
+      workOrderNumber: 'WO-INDEPENDENT',
+      manufacturingOrderId: 'mo-9001',
+      startDate: '2024-01-01T08:00:00.000Z',
+      endDate: '2024-01-01T10:00:00.000Z',
+      durationMinutes: 120,
+      workCenterId: 'wc-other',
+      dependsOnWorkOrderIds: [],
+      isMaintenance: false,
+    });
+    expect(result.changes.map((change) => change.workOrderId).sort()).toEqual([
+      'wo-b-weld',
+      'wo-c-paint',
+    ]);
+  });
+
+  it('reflows downstream dependent orders from the trigger work order', () => {
+    const input: ReflowInput = {
+      workCenters: [
+        {
+          docId: 'wc-start',
+          docType: 'workCenter',
+          data: { name: 'Start Station', shifts, maintenanceWindows: [] },
+        },
+        {
+          docId: 'wc-next',
+          docType: 'workCenter',
+          data: { name: 'Next Station', shifts, maintenanceWindows: [] },
+        },
+      ],
+      manufacturingOrders: [],
+      triggerWorkOrderId: 'wo-trigger',
+      workOrders: [
+        {
+          docId: 'wo-trigger',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-TRIGGER',
+            manufacturingOrderId: 'mo-8001',
+            startDate: '2024-01-01T10:00:00.000Z',
+            endDate: '2024-01-01T12:00:00.000Z',
+            durationMinutes: 120,
+            workCenterId: 'wc-start',
+            dependsOnWorkOrderIds: [],
+            isMaintenance: false,
+          },
+        },
+        {
+          docId: 'wo-downstream',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-DOWNSTREAM',
+            manufacturingOrderId: 'mo-8001',
+            startDate: '2024-01-01T10:00:00.000Z',
+            endDate: '2024-01-01T12:00:00.000Z',
+            durationMinutes: 120,
+            workCenterId: 'wc-next',
+            dependsOnWorkOrderIds: ['wo-trigger'],
+            isMaintenance: false,
+          },
+        },
+      ],
+    };
+
+    const result = reflowSchedule(input);
+
+    expect(getWorkOrder(result, 'wo-trigger').data).toMatchObject({
+      startDate: '2024-01-01T10:00:00.000Z',
+      endDate: '2024-01-01T12:00:00.000Z',
+    });
+    expect(getWorkOrder(result, 'wo-downstream').data).toMatchObject({
+      startDate: '2024-01-01T12:00:00.000Z',
+      endDate: '2024-01-01T14:00:00.000Z',
+    });
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]).toMatchObject({
+      workOrderId: 'wo-downstream',
+      reason: 'Delayed by dependency on wo-trigger',
+    });
+  });
 });

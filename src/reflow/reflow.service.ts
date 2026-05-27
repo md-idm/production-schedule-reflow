@@ -218,6 +218,119 @@ function sortProductionOrdersByDependency(
   return sorted;
 }
 
+function buildDependentsByParent(
+  productionIds: Set<string>,
+  workOrdersById: Map<string, WorkOrderDocument>,
+): Map<string, string[]> {
+  const dependentsByParent = new Map<string, string[]>();
+
+  for (const orderId of productionIds) {
+    dependentsByParent.set(orderId, []);
+  }
+
+  for (const orderId of productionIds) {
+    const order = workOrdersById.get(orderId);
+    if (!order) {
+      continue;
+    }
+
+    for (const parentId of order.data.dependsOnWorkOrderIds) {
+      if (!productionIds.has(parentId)) {
+        continue;
+      }
+
+      dependentsByParent.get(parentId)!.push(orderId);
+    }
+  }
+
+  for (const children of dependentsByParent.values()) {
+    children.sort((a, b) => a.localeCompare(b));
+  }
+
+  return dependentsByParent;
+}
+
+/** Returns null when trigger-aware scope cannot be determined safely. */
+function buildAffectedWorkOrderIds(
+  triggerWorkOrderId: string,
+  workOrdersById: Map<string, WorkOrderDocument>,
+  productionIds: Set<string>,
+  dependentsByParent: Map<string, string[]>,
+): Set<string> | null {
+  const trigger = workOrdersById.get(triggerWorkOrderId);
+  if (!trigger || trigger.data.isMaintenance || !productionIds.has(triggerWorkOrderId)) {
+    return null;
+  }
+
+  const affected = new Set<string>([triggerWorkOrderId]);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    const snapshot = [...affected].sort((a, b) => a.localeCompare(b));
+
+    for (const orderId of snapshot) {
+      const order = workOrdersById.get(orderId);
+      if (!order) {
+        return null;
+      }
+
+      const ancestorQueue = [orderId];
+      while (ancestorQueue.length > 0) {
+        const currentId = ancestorQueue.shift()!;
+        const current = workOrdersById.get(currentId);
+        if (!current) {
+          return null;
+        }
+
+        for (const parentId of current.data.dependsOnWorkOrderIds) {
+          if (!productionIds.has(parentId)) {
+            continue;
+          }
+
+          if (!affected.has(parentId)) {
+            affected.add(parentId);
+            changed = true;
+          }
+
+          ancestorQueue.push(parentId);
+        }
+      }
+
+      const queue = [orderId];
+      while (queue.length > 0) {
+        const currentId = queue.shift()!;
+        for (const childId of dependentsByParent.get(currentId) ?? []) {
+          if (affected.has(childId)) {
+            continue;
+          }
+
+          affected.add(childId);
+          changed = true;
+          queue.push(childId);
+        }
+      }
+
+      const workCenterId = order.data.workCenterId;
+      for (const candidateId of [...productionIds].sort((a, b) => a.localeCompare(b))) {
+        if (affected.has(candidateId)) {
+          continue;
+        }
+
+        const candidate = workOrdersById.get(candidateId);
+        if (!candidate || candidate.data.workCenterId !== workCenterId) {
+          continue;
+        }
+
+        affected.add(candidateId);
+        changed = true;
+      }
+    }
+  }
+
+  return affected;
+}
+
 function findLatestDependencyEnd(
   workOrder: WorkOrderDocument,
   workOrdersById: Map<string, WorkOrderDocument>,
@@ -366,6 +479,15 @@ export function reflowSchedule(input: ReflowInput): ReflowResult {
   const productionOrders = sortProductionOrdersByDependency(
     workOrders.filter((workOrder) => !workOrder.data.isMaintenance),
   );
+  const productionIds = new Set(productionOrders.map((order) => order.docId));
+  const dependentsByParent = buildDependentsByParent(productionIds, workOrdersById);
+  const affectedWorkOrderIds = buildAffectedWorkOrderIds(
+    input.triggerWorkOrderId,
+    workOrdersById,
+    productionIds,
+    dependentsByParent,
+  );
+  const useTriggerAwareReflow = affectedWorkOrderIds !== null;
 
   const reasons = new Map<string, string>();
   let changed = true;
@@ -374,6 +496,10 @@ export function reflowSchedule(input: ReflowInput): ReflowResult {
     changed = false;
 
     for (const workOrder of productionOrders) {
+      if (useTriggerAwareReflow && !affectedWorkOrderIds.has(workOrder.docId)) {
+        continue;
+      }
+
       const workCenter = workCentersById.get(workOrder.data.workCenterId);
       if (!workCenter) {
         throw new Error(`Missing work center: ${workOrder.data.workCenterId}`);
