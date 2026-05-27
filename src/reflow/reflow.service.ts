@@ -163,6 +163,61 @@ function buildWorkOrdersByCenter(
   return workOrdersByCenter;
 }
 
+function sortProductionOrdersByDependency(
+  productionOrders: WorkOrderDocument[],
+): WorkOrderDocument[] {
+  const productionIds = new Set(productionOrders.map((order) => order.docId));
+  const ordersById = new Map(
+    productionOrders.map((order) => [order.docId, order]),
+  );
+  const inDegree = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+
+  for (const order of productionOrders) {
+    inDegree.set(order.docId, 0);
+    dependents.set(order.docId, []);
+  }
+
+  for (const order of productionOrders) {
+    for (const parentId of order.data.dependsOnWorkOrderIds) {
+      if (!productionIds.has(parentId)) {
+        continue;
+      }
+
+      inDegree.set(order.docId, (inDegree.get(order.docId) ?? 0) + 1);
+      dependents.get(parentId)!.push(order.docId);
+    }
+  }
+
+  const ready = productionOrders
+    .filter((order) => inDegree.get(order.docId) === 0)
+    .sort((a, b) => a.docId.localeCompare(b.docId));
+
+  const sorted: WorkOrderDocument[] = [];
+
+  while (ready.length > 0) {
+    ready.sort((a, b) => a.docId.localeCompare(b.docId));
+    const current = ready.shift()!;
+
+    sorted.push(current);
+
+    for (const childId of dependents.get(current.docId) ?? []) {
+      const nextInDegree = (inDegree.get(childId) ?? 0) - 1;
+      inDegree.set(childId, nextInDegree);
+
+      if (nextInDegree === 0) {
+        ready.push(ordersById.get(childId)!);
+      }
+    }
+  }
+
+  if (sorted.length !== productionOrders.length) {
+    throw new Error('Circular dependency detected between production work orders');
+  }
+
+  return sorted;
+}
+
 function findLatestDependencyEnd(
   workOrder: WorkOrderDocument,
   workOrdersById: Map<string, WorkOrderDocument>,
@@ -308,9 +363,9 @@ export function reflowSchedule(input: ReflowInput): ReflowResult {
     ]),
   );
 
-  const productionOrders = workOrders
-    .filter((workOrder) => !workOrder.data.isMaintenance)
-    .sort((a, b) => a.docId.localeCompare(b.docId));
+  const productionOrders = sortProductionOrdersByDependency(
+    workOrders.filter((workOrder) => !workOrder.data.isMaintenance),
+  );
 
   const reasons = new Map<string, string>();
   let changed = true;

@@ -300,4 +300,112 @@ describe('reflowSchedule', () => {
       'wo-b-inspect',
     ]);
   });
+
+  it('processes a parent before its child when docId would sort the child first', () => {
+    const input: ReflowInput = {
+      workCenters: [
+        {
+          docId: 'wc-parent',
+          docType: 'workCenter',
+          data: { name: 'Parent Station', shifts, maintenanceWindows: [] },
+        },
+        {
+          docId: 'wc-child',
+          docType: 'workCenter',
+          data: { name: 'Child Station', shifts, maintenanceWindows: [] },
+        },
+      ],
+      manufacturingOrders: [],
+      triggerWorkOrderId: 'wo-a-child',
+      workOrders: [
+        {
+          docId: 'wo-a-child',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-CHILD',
+            manufacturingOrderId: 'mo-6001',
+            startDate: '2024-01-01T17:00:00.000Z',
+            endDate: '2024-01-01T18:00:00.000Z',
+            durationMinutes: 60,
+            workCenterId: 'wc-child',
+            dependsOnWorkOrderIds: ['wo-z-parent'],
+            isMaintenance: false,
+          },
+        },
+        {
+          docId: 'wo-z-parent',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-PARENT',
+            manufacturingOrderId: 'mo-6001',
+            startDate: '2024-01-01T16:00:00.000Z',
+            endDate: '2024-01-01T19:00:00.000Z',
+            durationMinutes: 180,
+            workCenterId: 'wc-parent',
+            dependsOnWorkOrderIds: [],
+            isMaintenance: false,
+          },
+        },
+      ],
+    };
+
+    const result = reflowSchedule(input);
+
+    expect(getWorkOrder(result, 'wo-z-parent').data).toMatchObject({
+      startDate: '2024-01-01T16:00:00.000Z',
+      endDate: '2024-01-02T10:00:00.000Z',
+    });
+    expect(getWorkOrder(result, 'wo-a-child').data).toMatchObject({
+      startDate: '2024-01-02T10:00:00.000Z',
+      endDate: '2024-01-02T11:00:00.000Z',
+    });
+  });
+
+  it('throws when production work orders have a circular dependency', () => {
+    const input: ReflowInput = {
+      workCenters: [
+        {
+          docId: 'wc-1',
+          docType: 'workCenter',
+          data: { name: 'Station 1', shifts, maintenanceWindows: [] },
+        },
+      ],
+      manufacturingOrders: [],
+      triggerWorkOrderId: 'wo-a',
+      workOrders: [
+        {
+          docId: 'wo-a',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-A',
+            manufacturingOrderId: 'mo-7001',
+            startDate: '2024-01-01T08:00:00.000Z',
+            endDate: '2024-01-01T10:00:00.000Z',
+            durationMinutes: 120,
+            workCenterId: 'wc-1',
+            dependsOnWorkOrderIds: ['wo-b'],
+            isMaintenance: false,
+          },
+        },
+        {
+          docId: 'wo-b',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-B',
+            manufacturingOrderId: 'mo-7001',
+            startDate: '2024-01-01T10:00:00.000Z',
+            endDate: '2024-01-01T12:00:00.000Z',
+            durationMinutes: 120,
+            workCenterId: 'wc-1',
+            dependsOnWorkOrderIds: ['wo-a'],
+            isMaintenance: false,
+          },
+        },
+      ],
+    };
+
+    expect(() => reflowSchedule(input)).toThrow(
+      /Circular dependency detected between production work orders/,
+    );
+  });
 });
