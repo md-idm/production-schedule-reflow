@@ -106,6 +106,97 @@ function assertValidShifts(shifts: Shift[]): void {
   }
 }
 
+export interface WorkPeriod {
+  startDate: string;
+  endDate: string;
+}
+
+/** Returns true when the given moment falls inside an active shift. */
+export function isDateInActiveShift(dateIso: string, shifts: Shift[]): boolean {
+  return findActiveShift(parseUtc(dateIso), shifts) !== undefined;
+}
+
+/**
+ * Returns each continuous work segment while consuming duration during active shifts
+ * and skipping maintenance windows.
+ */
+export function getWorkPeriods(
+  startDate: string,
+  durationMinutes: number,
+  shifts: Shift[],
+  maintenanceWindows: MaintenanceWindow[] = [],
+): WorkPeriod[] {
+  if (!Number.isFinite(durationMinutes)) {
+    throw new Error('durationMinutes must be a finite number');
+  }
+
+  assertValidShifts(shifts);
+
+  if (durationMinutes <= 0) {
+    return [];
+  }
+
+  const periods: WorkPeriod[] = [];
+  let current = parseUtc(startDate);
+  let remainingMinutes = durationMinutes;
+  let chunkStart: DateTime | null = null;
+
+  while (remainingMinutes > 0) {
+    const activeMaintenance = findActiveMaintenance(current, maintenanceWindows);
+    if (activeMaintenance) {
+      if (chunkStart) {
+        periods.push({ startDate: chunkStart.toISO()!, endDate: current.toISO()! });
+        chunkStart = null;
+      }
+      current = parseUtc(activeMaintenance.endDate);
+      continue;
+    }
+
+    const activeShift = findActiveShift(current, shifts);
+    if (!activeShift) {
+      if (chunkStart) {
+        periods.push({ startDate: chunkStart.toISO()!, endDate: current.toISO()! });
+        chunkStart = null;
+      }
+      current = findNextShiftStart(current, shifts);
+      continue;
+    }
+
+    if (!chunkStart) {
+      chunkStart = current;
+    }
+
+    const shiftEnd = getShiftEnd(current, activeShift);
+    let workUntil = shiftEnd;
+
+    const maintenanceStart = findNextMaintenanceStart(current, shiftEnd, maintenanceWindows);
+    if (maintenanceStart) {
+      workUntil = maintenanceStart;
+    }
+
+    const availableMinutes = workUntil.diff(current, 'minutes').minutes;
+    if (availableMinutes <= 0) {
+      if (chunkStart) {
+        periods.push({ startDate: chunkStart.toISO()!, endDate: current.toISO()! });
+        chunkStart = null;
+      }
+      current = findNextShiftStart(current.plus({ minutes: 1 }), shifts);
+      continue;
+    }
+
+    const workedMinutes = Math.min(remainingMinutes, availableMinutes);
+    remainingMinutes -= workedMinutes;
+    current = current.plus({ minutes: workedMinutes });
+
+    if (remainingMinutes === 0 || workedMinutes < availableMinutes) {
+      periods.push({ startDate: chunkStart.toISO()!, endDate: current.toISO()! });
+      chunkStart = null;
+    }
+  }
+
+  return periods;
+}
+
 /**
  * Calculates when work finishes by consuming duration only during active shifts,
  * pausing outside shift hours and skipping maintenance windows.
@@ -126,43 +217,6 @@ export function calculateEndDateWithShifts(
     return parseUtc(startDate).toISO()!;
   }
 
-  let current = parseUtc(startDate);
-  let remainingMinutes = durationMinutes;
-
-  while (remainingMinutes > 0) {
-    // Maintenance blocks all work — jump to when it ends.
-    const activeMaintenance = findActiveMaintenance(current, maintenanceWindows);
-    if (activeMaintenance) {
-      current = parseUtc(activeMaintenance.endDate);
-      continue;
-    }
-
-    const activeShift = findActiveShift(current, shifts);
-    if (!activeShift) {
-      // Outside shift hours — resume at the next available shift.
-      current = findNextShiftStart(current, shifts);
-      continue;
-    }
-
-    const shiftEnd = getShiftEnd(current, activeShift);
-    let workUntil = shiftEnd;
-
-    // Stop early if maintenance begins before the shift ends.
-    const maintenanceStart = findNextMaintenanceStart(current, shiftEnd, maintenanceWindows);
-    if (maintenanceStart) {
-      workUntil = maintenanceStart;
-    }
-
-    const availableMinutes = workUntil.diff(current, 'minutes').minutes;
-    if (availableMinutes <= 0) {
-      current = findNextShiftStart(current.plus({ minutes: 1 }), shifts);
-      continue;
-    }
-
-    const workedMinutes = Math.min(remainingMinutes, availableMinutes);
-    remainingMinutes -= workedMinutes;
-    current = current.plus({ minutes: workedMinutes });
-  }
-
-  return current.toISO()!;
+  const periods = getWorkPeriods(startDate, durationMinutes, shifts, maintenanceWindows);
+  return periods.at(-1)?.endDate ?? parseUtc(startDate).toISO()!;
 }
