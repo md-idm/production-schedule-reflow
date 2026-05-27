@@ -1,13 +1,13 @@
 import { DateTime } from 'luxon';
 
-import { calculateEndDateWithShifts, getWorkPeriods } from '../utils/date-utils.js';
-import { hasWorkCenterOverlap } from './constraint-checker.js';
+import { getWorkPeriods, type WorkPeriod } from '../utils/date-utils.js';
 import type {
   ReflowInput,
   ReflowResult,
   ScheduleChange,
   Shift,
   MaintenanceWindow,
+  WorkOrderData,
   WorkOrderDocument,
 } from './types.js';
 
@@ -40,12 +40,77 @@ function copyWorkOrder(workOrder: WorkOrderDocument): WorkOrderDocument {
   };
 }
 
+function workPeriodsCacheKey(data: WorkOrderData): string {
+  return `${data.startDate}|${data.endDate}|${data.durationMinutes}`;
+}
+
+function getWorkOrderPeriods(
+  workOrder: WorkOrderDocument,
+  shifts: Shift[],
+  maintenanceWindows: MaintenanceWindow[],
+  periodsCache: Map<string, { key: string; periods: WorkPeriod[] }>,
+): WorkPeriod[] {
+  const cacheKey = workPeriodsCacheKey(workOrder.data);
+  const cached = periodsCache.get(workOrder.docId);
+
+  if (cached?.key === cacheKey) {
+    return cached.periods;
+  }
+
+  const periods = getWorkPeriods(
+    workOrder.data.startDate,
+    workOrder.data.durationMinutes,
+    shifts,
+    maintenanceWindows,
+  );
+  periodsCache.set(workOrder.docId, { key: cacheKey, periods });
+
+  return periods;
+}
+
+/** Half-open interval overlap: [startA, endA) and [startB, endB). */
+function intervalsOverlap(
+  startA: string,
+  endA: string,
+  startB: string,
+  endB: string,
+): boolean {
+  const aStart = parseUtc(startA);
+  const aEnd = parseUtc(endA);
+  const bStart = parseUtc(startB);
+  const bEnd = parseUtc(endB);
+
+  return aStart < bEnd && bStart < aEnd;
+}
+
+function workPeriodListsOverlap(
+  firstPeriods: WorkPeriod[],
+  secondPeriods: WorkPeriod[],
+): boolean {
+  for (const first of firstPeriods) {
+    for (const second of secondPeriods) {
+      if (
+        intervalsOverlap(
+          first.startDate,
+          first.endDate,
+          second.startDate,
+          second.endDate,
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function scheduleFromStart(
   candidateStart: string,
   durationMinutes: number,
   shifts: Shift[],
   maintenanceWindows: MaintenanceWindow[],
-): { startDate: string; endDate: string } {
+): { startDate: string; endDate: string; periods: WorkPeriod[] } {
   const periods = getWorkPeriods(
     candidateStart,
     durationMinutes,
@@ -54,13 +119,28 @@ function scheduleFromStart(
   );
 
   if (periods.length === 0) {
-    return { startDate: candidateStart, endDate: candidateStart };
+    return { startDate: candidateStart, endDate: candidateStart, periods };
   }
 
   return {
     startDate: periods[0]!.startDate,
     endDate: periods.at(-1)!.endDate,
+    periods,
   };
+}
+
+function buildWorkOrdersByCenter(
+  workOrders: WorkOrderDocument[],
+): Map<string, WorkOrderDocument[]> {
+  const workOrdersByCenter = new Map<string, WorkOrderDocument[]>();
+
+  for (const workOrder of workOrders) {
+    const centerOrders = workOrdersByCenter.get(workOrder.data.workCenterId) ?? [];
+    centerOrders.push(workOrder);
+    workOrdersByCenter.set(workOrder.data.workCenterId, centerOrders);
+  }
+
+  return workOrdersByCenter;
 }
 
 function findLatestDependencyEnd(
@@ -91,20 +171,29 @@ function findLatestDependencyEnd(
 }
 
 function findWorkCenterConflict(
-  workOrder: WorkOrderDocument,
-  otherWorkOrders: WorkOrderDocument[],
+  scheduledPeriods: WorkPeriod[],
+  workOrderId: string,
+  sameCenterOrders: WorkOrderDocument[],
   shifts: Shift[],
   maintenanceWindows: MaintenanceWindow[],
+  periodsCache: Map<string, { key: string; periods: WorkPeriod[] }>,
 ): WorkOrderDocument | null {
   let latestConflict: WorkOrderDocument | null = null;
   let latestConflictEnd: DateTime | null = null;
 
-  for (const other of otherWorkOrders) {
-    if (other.data.workCenterId !== workOrder.data.workCenterId) {
+  for (const other of sameCenterOrders) {
+    if (other.docId === workOrderId) {
       continue;
     }
 
-    if (!hasWorkCenterOverlap(workOrder, other, shifts, maintenanceWindows)) {
+    const otherPeriods = getWorkOrderPeriods(
+      other,
+      shifts,
+      maintenanceWindows,
+      periodsCache,
+    );
+
+    if (!workPeriodListsOverlap(scheduledPeriods, otherPeriods)) {
       continue;
     }
 
@@ -120,10 +209,11 @@ function findWorkCenterConflict(
 
 function placeWorkOrder(
   workOrder: WorkOrderDocument,
-  otherWorkOrders: WorkOrderDocument[],
+  sameCenterOrders: WorkOrderDocument[],
   shifts: Shift[],
   maintenanceWindows: MaintenanceWindow[],
   workOrdersById: Map<string, WorkOrderDocument>,
+  periodsCache: Map<string, { key: string; periods: WorkPeriod[] }>,
 ): { startDate: string; endDate: string; reason: string } {
   let candidateStart = workOrder.data.startDate;
   let reason = 'Reflow schedule update';
@@ -138,27 +228,20 @@ function placeWorkOrder(
       reason = `Delayed by dependency on ${dependency.parentId}`;
     }
 
-    let schedule = scheduleFromStart(
+    const schedule = scheduleFromStart(
       candidateStart,
       workOrder.data.durationMinutes,
       shifts,
       maintenanceWindows,
     );
 
-    const scheduledOrder: WorkOrderDocument = {
-      ...workOrder,
-      data: {
-        ...workOrder.data,
-        startDate: schedule.startDate,
-        endDate: schedule.endDate,
-      },
-    };
-
     const conflict = findWorkCenterConflict(
-      scheduledOrder,
-      otherWorkOrders,
+      schedule.periods,
+      workOrder.docId,
+      sameCenterOrders,
       shifts,
       maintenanceWindows,
+      periodsCache,
     );
 
     if (conflict) {
@@ -167,18 +250,11 @@ function placeWorkOrder(
       continue;
     }
 
-    // Ensure end date matches shift and maintenance rules.
-    schedule = {
+    return {
       startDate: schedule.startDate,
-      endDate: calculateEndDateWithShifts(
-        schedule.startDate,
-        workOrder.data.durationMinutes,
-        shifts,
-        maintenanceWindows,
-      ),
+      endDate: schedule.endDate,
+      reason,
     };
-
-    return { ...schedule, reason };
   }
 
   throw new Error(
@@ -192,6 +268,8 @@ export function reflowSchedule(input: ReflowInput): ReflowResult {
   const workCentersById = new Map(
     input.workCenters.map((workCenter) => [workCenter.docId, workCenter.data]),
   );
+  const workOrdersByCenter = buildWorkOrdersByCenter(workOrders);
+  const periodsCache = new Map<string, { key: string; periods: WorkPeriod[] }>();
 
   const originalDates = new Map(
     input.workOrders.map((workOrder) => [
@@ -219,16 +297,16 @@ export function reflowSchedule(input: ReflowInput): ReflowResult {
         throw new Error(`Missing work center: ${workOrder.data.workCenterId}`);
       }
 
-      const otherWorkOrders = workOrders.filter(
-        (candidate) => candidate.docId !== workOrder.docId,
-      );
+      const sameCenterOrders =
+        workOrdersByCenter.get(workOrder.data.workCenterId) ?? [];
 
       const placement = placeWorkOrder(
         workOrder,
-        otherWorkOrders,
+        sameCenterOrders,
         workCenter.shifts,
         workCenter.maintenanceWindows,
         workOrdersById,
+        periodsCache,
       );
 
       const datesChanged =
