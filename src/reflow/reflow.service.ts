@@ -68,6 +68,26 @@ function getWorkOrderPeriods(
   return periods;
 }
 
+function getWorkOrderReleaseTime(
+  workOrder: WorkOrderDocument,
+  shifts: Shift[],
+  maintenanceWindows: MaintenanceWindow[],
+  periodsCache: Map<string, { key: string; periods: WorkPeriod[] }>,
+): string {
+  const periods = getWorkOrderPeriods(
+    workOrder,
+    shifts,
+    maintenanceWindows,
+    periodsCache,
+  );
+
+  if (periods.length === 0) {
+    return workOrder.data.endDate;
+  }
+
+  return periods.at(-1)!.endDate;
+}
+
 /** Half-open interval overlap: [startA, endA) and [startB, endB). */
 function intervalsOverlap(
   startA: string,
@@ -197,9 +217,11 @@ function findWorkCenterConflict(
       continue;
     }
 
-    const otherEnd = parseUtc(other.data.endDate);
-    if (!latestConflictEnd || otherEnd >= latestConflictEnd) {
-      latestConflictEnd = otherEnd;
+    const otherRelease = parseUtc(
+      getWorkOrderReleaseTime(other, shifts, maintenanceWindows, periodsCache),
+    );
+    if (!latestConflictEnd || otherRelease >= latestConflictEnd) {
+      latestConflictEnd = otherRelease;
       latestConflict = other;
     }
   }
@@ -245,7 +267,12 @@ function placeWorkOrder(
     );
 
     if (conflict) {
-      candidateStart = conflict.data.endDate;
+      candidateStart = getWorkOrderReleaseTime(
+        conflict,
+        shifts,
+        maintenanceWindows,
+        periodsCache,
+      );
       reason = `Delayed by work center conflict with ${conflict.docId}`;
       continue;
     }

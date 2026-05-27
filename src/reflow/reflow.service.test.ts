@@ -219,6 +219,69 @@ describe('reflowSchedule', () => {
     });
   });
 
+  it('uses the conflicting order work period end when its endDate is stale', () => {
+    const maintenanceWindows = [
+      {
+        startDate: '2024-01-02T10:00:00.000Z',
+        endDate: '2024-01-02T14:00:00.000Z',
+      },
+    ];
+    const input: ReflowInput = {
+      workCenters: [
+        {
+          docId: 'wc-mill-1',
+          docType: 'workCenter',
+          data: { name: 'Mill Station 1', shifts, maintenanceWindows },
+        },
+      ],
+      manufacturingOrders: [],
+      triggerWorkOrderId: 'wo-1-overlap',
+      workOrders: [
+        {
+          docId: 'wo-2-blocker',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-BLOCKER',
+            manufacturingOrderId: 'mo-5001',
+            startDate: '2024-01-02T09:00:00.000Z',
+            endDate: '2024-01-02T13:00:00.000Z',
+            durationMinutes: 180,
+            workCenterId: 'wc-mill-1',
+            dependsOnWorkOrderIds: [],
+            isMaintenance: false,
+          },
+        },
+        {
+          docId: 'wo-1-overlap',
+          docType: 'workOrder',
+          data: {
+            workOrderNumber: 'WO-OVERLAP',
+            manufacturingOrderId: 'mo-5001',
+            startDate: '2024-01-02T09:30:00.000Z',
+            endDate: '2024-01-02T11:30:00.000Z',
+            durationMinutes: 120,
+            workCenterId: 'wc-mill-1',
+            dependsOnWorkOrderIds: [],
+            isMaintenance: false,
+          },
+        },
+      ],
+    };
+
+    const result = reflowSchedule(input);
+
+    expect(getWorkOrder(result, 'wo-2-blocker').data).toMatchObject({
+      startDate: '2024-01-02T09:00:00.000Z',
+      endDate: '2024-01-02T16:00:00.000Z',
+    });
+    expect(getWorkOrder(result, 'wo-1-overlap').data.startDate).toBe(
+      '2024-01-02T16:00:00.000Z',
+    );
+    expect(getWorkOrder(result, 'wo-1-overlap').data.startDate).not.toBe(
+      '2024-01-02T13:00:00.000Z',
+    );
+  });
+
   it('corrects shift boundary end dates and moves dependent work later', () => {
     const result = reflowSchedule(createShiftBoundaryInput());
 
