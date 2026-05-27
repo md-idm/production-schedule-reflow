@@ -63,6 +63,8 @@ The project intentionally avoids databases, APIs, and UI layers in order to focu
 5. Repeat full passes until no dates change
 6. Record `ScheduleChange` entries with reasons and delay minutes
 
+**Deterministic tie-breaking.** Independent work orders are processed in stable `docId` order. This is intentional: the same input always produces the same output. In a production system, that ordering could be replaced with business priority, due date, or topological dependency ordering.
+
 Overlap checks use actual work periods, not raw calendar spans between start and end dates.
 
 ## Demo Scenarios
@@ -96,7 +98,7 @@ The large dataset scenario is intended as a scalability demonstration rather tha
 
 - Dates are UTC ISO 8601 strings
 - Shifts use whole-hour boundaries; no overnight shifts
-- Processing order is deterministic (`docId` sort)
+- Independent work orders use stable `docId` ordering for deterministic tie-breaking (see Reflow Algorithm)
 - No persistence layer—in-memory data only
 - `durationMinutes` is fixed during reflow
 
